@@ -1,0 +1,16 @@
+[package]
+name = "ai-novel-translation"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+reqwest = { version = "0.13.1", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_yml = "0.0.12"
+serde_json = "1.0"
+anyhow = "1.0" # 簡化錯誤處理
+walkdir = "2.4" # 遞迴讀取資料夾
+indicatif = "0.18.3" # 進度條 (可選，增加體驗)
+fs-err = "3.2.2" # 更好的檔案系統錯誤訊息
+async-trait = "0.1.89"

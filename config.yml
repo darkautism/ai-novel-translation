@@ -1,0 +1,23 @@
+llm:
+  provider: "gemini" # 選項: "gemini" 或 "ollama"
+
+  gemini:
+    api_key: "YourAPIKEY"
+    model: "gemini-3-flash-preview"
+
+  ollama:
+    base_url: "http://localhost:11434"
+    model: "llama3:latest" # 或是 qwen2.5, mistral 等
+
+translation:
+  target_language: "Traditional Chinese (Taiwan)"
+  input_folder: "./input_chapters"
+  output_folder: "./output_chapters"
+  glossary_folder: "./glossaries"
+  
+constraints:
+  max_summary_length: 300 # 字數或 token 提示
+  max_dictionary_size: 1000 # 每次提取的新詞數量上限
+
+runtime:
+  unattended_mode: false # true: 自動跑完; false: 每章暫停
