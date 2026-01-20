@@ -75,13 +75,13 @@ fn load_glossary(folder: &Path, file_name: &str) -> Option<ChapterGlossary> {
 }
 
 // 寫入字典檔
-fn save_glossary(folder: &Path, file_name: &str, data: &ChapterGlossary) -> Result<()> {
+async fn save_glossary(folder: &Path, file_name: &str, data: &ChapterGlossary) -> Result<()> {
     if !folder.exists() {
-        fs_err::create_dir_all(folder)?;
+        tokio::fs::create_dir_all(folder).await?;
     }
     let path = folder.join(format!("{}.json", file_name));
-    let file = fs_err::File::create(path)?;
-    serde_json::to_writer_pretty(file, data)?;
+    let content = serde_json::to_string_pretty(data)?;
+    tokio::fs::write(path, content).await?;
     Ok(())
 }
 
@@ -137,13 +137,12 @@ async fn process_chapter(
         summary: analysis.summary,
         terms: current_terms,
     };
-
-    // 立即存檔字典 (這就是你的需求：每一章存一個字典)
+    
     save_glossary(
         &config.translation.glossary_folder,
         &file_stem,
         &current_chapter_data,
-    )?;
+    ).await?;
     println!(
         "    - 字典已存檔至 glossaries/{}.json (目前詞條數: {})",
         file_stem,
