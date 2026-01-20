@@ -10,9 +10,10 @@ use serde_json::json;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct LlmConfig {
-    pub provider: String, // "gemini" or "ollama"
+    pub provider: String, // "gemini", "ollama", "openai"
     pub gemini: Option<GeminiConfig>,
     pub ollama: Option<OllamaConfig>,
+    pub openai: Option<OpenAIConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -25,6 +26,13 @@ pub struct GeminiConfig {
 pub struct OllamaConfig {
     pub base_url: String,
     pub model: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct OpenAIConfig {
+    pub api_key: String,
+    pub model: String,
+    pub base_url: Option<String>,
 }
 
 // --- 2. 定義 Trait ---
@@ -153,7 +161,68 @@ impl LlmClient for OllamaClient {
     }
 }
 
-// --- 5. 工廠模式 (Factory) ---
+// --- 5. OpenAI 實作 ---
+
+struct OpenAIClient {
+    client: Client,
+    config: OpenAIConfig,
+}
+
+#[async_trait]
+impl LlmClient for OpenAIClient {
+    async fn generate(
+        &self,
+        system_prompt: &str,
+        user_content: &str,
+        json_mode: bool,
+    ) -> Result<String> {
+        let base_url = self
+            .config
+            .base_url
+            .as_deref()
+            .unwrap_or("https://api.openai.com/v1");
+        let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+
+        let mut payload = json!({
+            "model": self.config.model,
+            "messages": [
+                { "role": "system", "content": system_prompt },
+                { "role": "user", "content": user_content }
+            ],
+            "temperature": 0.2
+        });
+
+        if json_mode {
+            payload
+                .as_object_mut()
+                .unwrap()
+                .insert("response_format".to_string(), json!({ "type": "json_object" }));
+        }
+
+        let res = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.config.api_key))
+            .json(&payload)
+            .send()
+            .await?;
+
+        if !res.status().is_success() {
+            let err_text = res.text().await?;
+            bail!("OpenAI API Error: {}", err_text);
+        }
+
+        let body: serde_json::Value = res.json().await?;
+        let text = body["choices"][0]["message"]["content"]
+            .as_str()
+            .context("無法解析 OpenAI 回傳內容")?
+            .to_string();
+
+        Ok(text)
+    }
+}
+
+// --- 6. 工廠模式 (Factory) ---
 
 pub fn create_llm_client(config: &LlmConfig) -> Result<Box<dyn LlmClient>> {
     let client = Client::new();
@@ -168,6 +237,13 @@ pub fn create_llm_client(config: &LlmConfig) -> Result<Box<dyn LlmClient>> {
         "ollama" => {
             let conf = config.ollama.as_ref().context("未設定 ollama 區塊")?;
             Ok(Box::new(OllamaClient {
+                client,
+                config: conf.clone(),
+            }))
+        }
+        "openai" => {
+            let conf = config.openai.as_ref().context("未設定 openai 區塊")?;
+            Ok(Box::new(OpenAIClient {
                 client,
                 config: conf.clone(),
             }))

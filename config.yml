@@ -1,5 +1,5 @@
 llm:
-  provider: "gemini" # 選項: "gemini" 或 "ollama"
+  provider: "gemini" # 選項: "gemini", "ollama", "openai"
 
   gemini:
     api_key: "YourAPIKEY"
@@ -8,6 +8,11 @@ llm:
   ollama:
     base_url: "http://localhost:11434"
     model: "llama3:latest" # 或是 qwen2.5, mistral 等
+
+  openai:
+    api_key: "YourOpenAIKey"
+    model: "gpt-4o"
+    # base_url: "https://api.openai.com/v1" # Optional
 
 translation:
   target_language: "Traditional Chinese (Taiwan)"
