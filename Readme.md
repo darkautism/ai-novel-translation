@@ -1,5 +1,7 @@
 # AI Novel Translation (AI 小說翻譯工具)
 
+![CI](https://github.com/darkautism/ai-novel-translation/actions/workflows/ci.yml/badge.svg)
+
 這是一個基於 Rust 開發的 AI 小說翻譯工具，專為翻譯連載小說設計。它採用雙階段處理流程（Two-Pass），確保翻譯的一致性與連貫性。
 
 ## 特色
