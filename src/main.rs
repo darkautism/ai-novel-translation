@@ -187,7 +187,7 @@ async fn main() -> Result<()> {
     };
     let config_str =
         fs_err::read_to_string(config_path).context(format!("找不到 {}", config_path))?;
-    let config: Config = serde_yml::from_str(&config_str)?;
+    let config: Config = serde_norway::from_str(&config_str)?;
 
     let llm_client = create_llm_client(&config.llm)?;
     println!("已初始化 LLM Provider: {}", config.llm.provider);
