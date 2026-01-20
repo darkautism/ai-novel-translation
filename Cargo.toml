@@ -14,3 +14,4 @@ walkdir = "2.4" # 遞迴讀取資料夾
 indicatif = "0.18.3" # 進度條 (可選，增加體驗)
 fs-err = "3.2.2" # 更好的檔案系統錯誤訊息
 async-trait = "0.1.89"
+minijinja = "2.14.0"

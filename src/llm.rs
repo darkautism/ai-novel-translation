@@ -32,7 +32,12 @@ pub struct OllamaConfig {
 #[async_trait]
 pub trait LlmClient: Send + Sync {
     /// json_mode: 用來告訴 LLM 是否強制輸出 JSON 格式
-    async fn generate(&self, system_prompt: &str, user_content: &str, json_mode: bool) -> Result<String>;
+    async fn generate(
+        &self,
+        system_prompt: &str,
+        user_content: &str,
+        json_mode: bool,
+    ) -> Result<String>;
 }
 
 // --- 3. Gemini 實作 ---
@@ -44,7 +49,12 @@ struct GeminiClient {
 
 #[async_trait]
 impl LlmClient for GeminiClient {
-    async fn generate(&self, system_prompt: &str, user_content: &str, json_mode: bool) -> Result<String> {
+    async fn generate(
+        &self,
+        system_prompt: &str,
+        user_content: &str,
+        json_mode: bool,
+    ) -> Result<String> {
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
             self.config.model, self.config.api_key
@@ -62,8 +72,11 @@ impl LlmClient for GeminiClient {
         };
 
         let payload = json!({
+            "system_instruction": {
+            "parts": [{"text": system_prompt}]
+            },
             "contents": [{
-                "parts": [{ "text": format!("{}\n\n---\n\n{}", system_prompt, user_content) }]
+                "parts": [{ "text": user_content }]
             }],
             "generationConfig": generation_config
         });
@@ -94,7 +107,12 @@ struct OllamaClient {
 
 #[async_trait]
 impl LlmClient for OllamaClient {
-    async fn generate(&self, system_prompt: &str, user_content: &str, json_mode: bool) -> Result<String> {
+    async fn generate(
+        &self,
+        system_prompt: &str,
+        user_content: &str,
+        json_mode: bool,
+    ) -> Result<String> {
         let url = format!("{}/api/chat", self.config.base_url.trim_end_matches('/'));
 
         let mut payload = json!({
@@ -106,12 +124,15 @@ impl LlmClient for OllamaClient {
             "stream": false,
             "options": {
                 "temperature": 0.2,
-                "num_ctx": 4096 
+                "num_ctx": 4096
             }
         });
 
         if json_mode {
-            payload.as_object_mut().unwrap().insert("format".to_string(), json!("json"));
+            payload
+                .as_object_mut()
+                .unwrap()
+                .insert("format".to_string(), json!("json"));
         }
 
         let res = self.client.post(&url).json(&payload).send().await?;
@@ -122,7 +143,7 @@ impl LlmClient for OllamaClient {
         }
 
         let body: serde_json::Value = res.json().await?;
-        
+
         let text = body["message"]["content"]
             .as_str()
             .context("無法解析 Ollama 回傳內容")?

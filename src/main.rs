@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use minijinja::{Environment, context};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{self, Write};
@@ -7,7 +8,7 @@ use walkdir::WalkDir;
 
 mod llm;
 
-use crate::llm::{create_llm_client, LlmClient, LlmConfig};
+use crate::llm::{LlmClient, LlmConfig, create_llm_client};
 
 // --- 結構定義 ---
 
@@ -17,6 +18,7 @@ struct Config {
     translation: TranslationConfig,
     constraints: ConstraintsConfig,
     runtime: RuntimeConfig,
+    prompts: PromptsConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -24,7 +26,7 @@ struct TranslationConfig {
     target_language: String,
     input_folder: PathBuf,
     output_folder: PathBuf,
-    glossary_folder: PathBuf, // 新增
+    glossary_folder: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -36,6 +38,12 @@ struct ConstraintsConfig {
 #[derive(Debug, Deserialize)]
 struct RuntimeConfig {
     unattended_mode: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct PromptsConfig {
+    analysis_prompt: String,
+    translation_prompt: String,
 }
 
 // 字典檔案格式
@@ -87,44 +95,34 @@ async fn process_chapter(
 ) -> Result<ChapterGlossary> {
     let file_stem = file_path.file_stem().unwrap().to_string_lossy().to_string();
     let file_name = file_path.file_name().unwrap().to_string_lossy().to_string();
-    
+
     println!("正在處理: {}", file_name);
     let content = fs_err::read_to_string(file_path)?;
 
     // === Pass 1: 分析 (基於上一章的字典與摘要) ===
     println!("  > Pass 1: 分析文本與提取新詞...");
-    
+
     let base_terms_json = serde_json::to_string(&previous_glossary.terms)?;
 
-    let analysis_prompt = format!(
-        "你是一個專業的翻譯助手。
-        目標：
-        1. 目標語言是 {}。
-        . 閱讀文章，產生本章節摘要 (最多 {} 字)。
-        3. 提取新的專有名詞 (人名、地名、術語) (最多 {} 個)。
-        4. 為遵守json格式，摘要請單行且避免使用單雙引號
-        
-        參考資訊：
-        - 上一章摘要: {}
-        - 已存在的字典: {} (請勿重複提取已存在的詞，除非需要修正)
-        
-        請回傳標準 JSON 格式：
-        {{
-            \"summary\": \"本章摘要...\",
-            \"new_glossary\": {{ \"新名詞\": \"中文翻譯\" }}
-        }}",
-        config.translation.target_language,
-        config.constraints.max_summary_length,
-        config.constraints.max_dictionary_size,
-        previous_glossary.summary,
-        base_terms_json
-    );
+    // 使用 minijinja 渲染 prompt
+    let mut env = Environment::new();
+    env.add_template("analysis", &config.prompts.analysis_prompt)?;
+    let tmpl = env.get_template("analysis")?;
+    let analysis_prompt = tmpl.render(context! {
+        target_lang => config.translation.target_language,
+        summary_len => config.constraints.max_summary_length,
+        glossary_limit => config.constraints.max_dictionary_size,
+        prev_summary => previous_glossary.summary,
+        existing_glossary => base_terms_json
+    })?;
 
     let raw_resp = llm.generate(&analysis_prompt, &content, false).await?;
-    
+
     // 簡單清理 json block 標記 (防呆)
-    let clean_json = raw_resp.trim()
-        .trim_start_matches("```json").trim_start_matches("```")
+    let clean_json = raw_resp
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
         .trim_end_matches("```");
 
     let analysis: AnalysisResponse = serde_json::from_str(clean_json)
@@ -141,29 +139,29 @@ async fn process_chapter(
     };
 
     // 立即存檔字典 (這就是你的需求：每一章存一個字典)
-    save_glossary(&config.translation.glossary_folder, &file_stem, &current_chapter_data)?;
-    println!("    - 字典已存檔至 glossaries/{}.json (目前詞條數: {})", file_stem, current_chapter_data.terms.len());
+    save_glossary(
+        &config.translation.glossary_folder,
+        &file_stem,
+        &current_chapter_data,
+    )?;
+    println!(
+        "    - 字典已存檔至 glossaries/{}.json (目前詞條數: {})",
+        file_stem,
+        current_chapter_data.terms.len()
+    );
 
     // === Pass 2: 翻譯 ===
     println!("  > Pass 2: 翻譯中...");
-    
-    let final_terms_json = serde_json::to_string(&current_chapter_data.terms)?;
-    
-    let trans_prompt = format!(
-        "你是專業小說翻譯。請將文本翻譯成 {}。
-        
-        上下文摘要: {}
-        
-        **嚴格遵守以下名詞對照表**:
-        {}
 
-        翻譯後的正文請嚴格遵守以下格式：
-        
-        章節名稱後空行兩行接著正文，不要包含任何解釋或 markdown 標記，也不要輸出成xml或json。",
-        config.translation.target_language,
-        current_chapter_data.summary,
-        final_terms_json
-    );
+    let final_terms_json = serde_json::to_string(&current_chapter_data.terms)?;
+
+    env.add_template("translation", &config.prompts.translation_prompt)?;
+    let tmpl = env.get_template("translation")?;
+    let trans_prompt = tmpl.render(context! {
+        target_lang => config.translation.target_language,
+        summary => current_chapter_data.summary,
+        glossary => final_terms_json
+    })?;
 
     let mut translated_text = llm.generate(&trans_prompt, &content, false).await?;
 
@@ -183,17 +181,29 @@ async fn process_chapter(
 #[tokio::main]
 async fn main() -> Result<()> {
     // 1. 設定讀取
-    // 修正：通常慣例副檔名是 yaml 或 yml，且 Rust crate 主要是 serde_yaml
-    let config_path = if Path::new("config.yaml").exists() { "config.yaml" } else { "config.yml" };
-    let config_str = fs_err::read_to_string(config_path).context(format!("找不到 {}", config_path))?;
+    let config_path = if Path::new("config.yaml").exists() {
+        "config.yaml"
+    } else {
+        "config.yml"
+    };
+    let config_str =
+        fs_err::read_to_string(config_path).context(format!("找不到 {}", config_path))?;
     let config: Config = serde_yml::from_str(&config_str)?;
-    
+
     let llm_client = create_llm_client(&config.llm)?;
     println!("已初始化 LLM Provider: {}", config.llm.provider);
 
-
-
     // 2. 獲取所有輸入檔案並排序
+    if !config.translation.input_folder.exists() {
+        println!(
+            "輸入資料夾不存在，正在建立: {:?}",
+            config.translation.input_folder
+        );
+        fs_err::create_dir_all(&config.translation.input_folder)?;
+        println!("資料夾已建立。請將小說檔案放入資料夾後再次執行。");
+        return Ok(());
+    }
+
     let mut files: Vec<PathBuf> = WalkDir::new(&config.translation.input_folder)
         .into_iter()
         .filter_map(|e| e.ok())
@@ -201,7 +211,7 @@ async fn main() -> Result<()> {
         .map(|e| e.path().to_owned())
         .collect();
 
-    // 檔名自然排序 (這裡簡單用 sort，建議實際專案可引入 alphanumeric-sort)
+    // 檔名自然排序
     files.sort();
 
     if files.is_empty() {
@@ -214,9 +224,13 @@ async fn main() -> Result<()> {
     for (i, file_path) in files.iter().enumerate() {
         let file_name = file_path.file_name().unwrap().to_string_lossy();
         let file_stem = file_path.file_stem().unwrap().to_string_lossy();
-        
+
         let output_exists = config.translation.output_folder.join(&*file_name).exists();
-        let glossary_exists = config.translation.glossary_folder.join(format!("{}.json", file_stem)).exists();
+        let glossary_exists = config
+            .translation
+            .glossary_folder
+            .join(format!("{}.json", file_stem))
+            .exists();
 
         // 如果輸出或字典缺一個，就建議從這裡開始
         if !output_exists || !glossary_exists {
@@ -232,15 +246,25 @@ async fn main() -> Result<()> {
     // 4. 使用者互動與輸入驗證
     println!("=== AI 翻譯工具啟動 ===");
     println!("共發現 {} 個章節檔案。", files.len());
-    
+
     let suggested_display = if suggested_index < files.len() {
-        format!("第 {} 章 ({})", suggested_index + 1, files[suggested_index].file_name().unwrap().to_string_lossy())
+        format!(
+            "第 {} 章 ({})",
+            suggested_index + 1,
+            files[suggested_index]
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+        )
     } else {
         "全部完成".to_string()
     };
     println!("系統建議從 [{}] 開始。", suggested_display);
 
-    print!("請輸入要開始的章節序號 (1-{}) [按 Enter 使用建議值]: ", files.len());
+    print!(
+        "請輸入要開始的章節序號 (1-{}) [按 Enter 使用建議值]: ",
+        files.len()
+    );
     io::stdout().flush()?;
 
     let mut input_buf = String::new();
@@ -257,15 +281,21 @@ async fn main() -> Result<()> {
         match input.parse::<usize>() {
             Ok(n) if n > 0 && n <= files.len() => n - 1, // 轉換為 0-based index
             _ => {
-                eprintln!("輸入無效或超出範圍！將強制使用系統建議值: {}", suggested_display);
-                if suggested_index >= files.len() { return Ok(()); }
+                eprintln!(
+                    "輸入無效或超出範圍！將強制使用系統建議值: {}",
+                    suggested_display
+                );
+                if suggested_index >= files.len() {
+                    return Ok(());
+                }
                 suggested_index
             }
         }
     };
 
-    println!("-> 已確認從第 {} 章 ({}) 開始執行。", 
-        start_index + 1, 
+    println!(
+        "-> 已確認從第 {} 章 ({}) 開始執行。",
+        start_index + 1,
         files[start_index].file_name().unwrap().to_string_lossy()
     );
 
@@ -273,9 +303,12 @@ async fn main() -> Result<()> {
     let mut initial_glossary = ChapterGlossary::default();
 
     if start_index > 0 {
-        let prev_file_stem = files[start_index - 1].file_stem().unwrap().to_string_lossy();
+        let prev_file_stem = files[start_index - 1]
+            .file_stem()
+            .unwrap()
+            .to_string_lossy();
         print!("正在檢查上一章 ({}) 的字典檔... ", prev_file_stem);
-        
+
         if let Some(g) = load_glossary(&config.translation.glossary_folder, &prev_file_stem) {
             println!("成功載入！ (包含 {} 個詞條)", g.terms.len());
             initial_glossary = g;
@@ -285,7 +318,7 @@ async fn main() -> Result<()> {
             println!("這表示 AI 將無法得知之前的劇情摘要與專有名詞，可能會導致翻譯不連貫。");
             print!("確定要使用「空白字典」開始嗎？ (y/N): ");
             io::stdout().flush()?;
-            
+
             let mut confirm = String::new();
             io::stdin().read_line(&mut confirm)?;
             if !confirm.trim().eq_ignore_ascii_case("y") {

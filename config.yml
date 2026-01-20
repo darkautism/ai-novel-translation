@@ -21,3 +21,44 @@ constraints:
 
 runtime:
   unattended_mode: false # true: 自動跑完; false: 每章暫停
+
+prompts:
+  # 可用變數:
+  # - target_lang: 目標語言 (例如 "Traditional Chinese (Taiwan)")
+  # - summary_len: 摘要最大長度
+  # - glossary_limit: 每次提取新詞數量上限
+  # - prev_summary: 上一章的摘要
+  # - existing_glossary: 目前已存在的字典 (JSON 字串)
+  analysis_prompt: |
+    你是一個專業的翻譯助手。
+    目標：
+    1. 目標語言是 {{ target_lang }}。
+    2. 閱讀文章，產生本章節摘要 (最多 {{ summary_len }} 字)。
+    3. 提取新的專有名詞 (人名、地名、術語) (最多 {{ glossary_limit }} 個)。
+    4. 為遵守json格式，摘要請單行且避免使用單雙引號
+    
+    參考資訊：
+    - 上一章摘要: {{ prev_summary }}
+    - 已存在的字典: {{ existing_glossary }} (請勿重複提取已存在的詞，除非需要修正)
+    
+    請回傳標準 JSON 格式：
+    {
+        "summary": "本章摘要...",
+        "new_glossary": { "新名詞": "中文翻譯" }
+    }
+
+  # 可用變數:
+  # - target_lang: 目標語言
+  # - summary: 本章摘要 (由上一階段生成)
+  # - glossary: 完整的字典 (JSON 字串)
+  translation_prompt: |
+    你是專業小說翻譯。請將文本翻譯成 {{ target_lang }}。
+    
+    上下文摘要: {{ summary }}
+    
+    **嚴格遵守以下名詞對照表**:
+    {{ glossary }}
+
+    翻譯後的正文請嚴格遵守以下格式：
+    
+    章節名稱後空行兩行接著正文，不要包含任何解釋或 markdown 標記，也不要輸出成xml或json。
