@@ -85,11 +85,46 @@ async fn save_glossary(folder: &Path, file_name: &str, data: &ChapterGlossary) -
     Ok(())
 }
 
+fn sanitize_json_response(raw_resp: &str) -> String {
+    let trimmed = raw_resp.trim();
+    if !trimmed.starts_with("```") {
+        return trimmed.to_string();
+    }
+
+    let without_opening = trimmed.split_once('\n').map_or(trimmed, |(_, rest)| rest);
+    let without_closing = without_opening
+        .trim_end()
+        .strip_suffix("```")
+        .unwrap_or(without_opening);
+    without_closing.trim().to_string()
+}
+
+fn is_txt_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("txt"))
+}
+
+fn resolve_start_index(input: &str, suggested_index: usize, files_len: usize) -> (Option<usize>, bool) {
+    if input.is_empty() {
+        return (
+            (suggested_index < files_len).then_some(suggested_index),
+            false,
+        );
+    }
+
+    match input.parse::<usize>() {
+        Ok(n) if n > 0 && n <= files_len => (Some(n - 1), false),
+        _ => ((suggested_index < files_len).then_some(suggested_index), true),
+    }
+}
+
 // --- 核心處理 ---
 
 async fn process_chapter(
     llm: &dyn LlmClient,
     config: &Config,
+    prompt_env: &Environment<'_>,
     file_path: &Path,
     previous_glossary: &ChapterGlossary,
 ) -> Result<ChapterGlossary> {
@@ -105,9 +140,7 @@ async fn process_chapter(
     let base_terms_json = serde_json::to_string(&previous_glossary.terms)?;
 
     // 使用 minijinja 渲染 prompt
-    let mut env = Environment::new();
-    env.add_template("analysis", &config.prompts.analysis_prompt)?;
-    let tmpl = env.get_template("analysis")?;
+    let tmpl = prompt_env.get_template("analysis")?;
     let analysis_prompt = tmpl.render(context! {
         target_lang => config.translation.target_language,
         summary_len => config.constraints.max_summary_length,
@@ -116,16 +149,11 @@ async fn process_chapter(
         existing_glossary => base_terms_json
     })?;
 
-    let raw_resp = llm.generate(&analysis_prompt, &content, false).await?;
+    let raw_resp = llm.generate(&analysis_prompt, &content, true).await?;
 
-    // 簡單清理 json block 標記 (防呆)
-    let clean_json = raw_resp
-        .trim()
-        .trim_start_matches("```json")
-        .trim_start_matches("```")
-        .trim_end_matches("```");
+    let clean_json = sanitize_json_response(&raw_resp);
 
-    let analysis: AnalysisResponse = serde_json::from_str(clean_json)
+    let analysis: AnalysisResponse = serde_json::from_str(&clean_json)
         .context(format!("Pass 1 JSON 解析失敗，原始回應: {}", raw_resp))?;
 
     // 合併字典：舊字典 + 新字典
@@ -154,8 +182,7 @@ async fn process_chapter(
 
     let final_terms_json = serde_json::to_string(&current_chapter_data.terms)?;
 
-    env.add_template("translation", &config.prompts.translation_prompt)?;
-    let tmpl = env.get_template("translation")?;
+    let tmpl = prompt_env.get_template("translation")?;
     let trans_prompt = tmpl.render(context! {
         target_lang => config.translation.target_language,
         summary => current_chapter_data.summary,
@@ -190,6 +217,9 @@ async fn main() -> Result<()> {
     let config: Config = serde_norway::from_str(&config_str)?;
 
     let llm_client = create_llm_client(&config.llm)?;
+    let mut prompt_env = Environment::new();
+    prompt_env.add_template("analysis", &config.prompts.analysis_prompt)?;
+    prompt_env.add_template("translation", &config.prompts.translation_prompt)?;
     println!("已初始化 LLM Provider: {}", config.llm.provider);
 
     // 2. 獲取所有輸入檔案並排序
@@ -206,7 +236,7 @@ async fn main() -> Result<()> {
     let mut files: Vec<PathBuf> = WalkDir::new(&config.translation.input_folder)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_file())
+        .filter(|e| e.path().is_file() && is_txt_file(e.path()))
         .map(|e| e.path().to_owned())
         .collect();
 
@@ -270,26 +300,16 @@ async fn main() -> Result<()> {
     io::stdin().read_line(&mut input_buf)?;
     let input = input_buf.trim();
 
-    let start_index = if input.is_empty() {
-        if suggested_index >= files.len() {
-            println!("根據建議，所有檔案已完成。程式結束。");
-            return Ok(());
-        }
-        suggested_index
-    } else {
-        match input.parse::<usize>() {
-            Ok(n) if n > 0 && n <= files.len() => n - 1, // 轉換為 0-based index
-            _ => {
-                eprintln!(
-                    "輸入無效或超出範圍！將強制使用系統建議值: {}",
-                    suggested_display
-                );
-                if suggested_index >= files.len() {
-                    return Ok(());
-                }
-                suggested_index
-            }
-        }
+    let (start_index, used_fallback) = resolve_start_index(input, suggested_index, files.len());
+    if used_fallback {
+        eprintln!(
+            "輸入無效或超出範圍！將強制使用系統建議值: {}",
+            suggested_display
+        );
+    }
+    let Some(start_index) = start_index else {
+        println!("根據建議，所有檔案已完成。程式結束。");
+        return Ok(());
     };
 
     println!(
@@ -334,7 +354,7 @@ async fn main() -> Result<()> {
     let mut current_glossary = initial_glossary;
 
     for file_path in files.iter().skip(start_index) {
-        match process_chapter(&*llm_client, &config, file_path, &current_glossary).await {
+        match process_chapter(&*llm_client, &config, &prompt_env, file_path, &current_glossary).await {
             Ok(new_glossary) => {
                 current_glossary = new_glossary;
             }
@@ -360,4 +380,48 @@ async fn main() -> Result<()> {
 
     println!("\n工作佇列結束。");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_txt_file, resolve_start_index, sanitize_json_response};
+    use std::path::Path;
+
+    #[test]
+    fn sanitize_json_strips_markdown_fences() {
+        let raw = "```json\n{\"summary\":\"ok\"}\n```";
+        assert_eq!(sanitize_json_response(raw), "{\"summary\":\"ok\"}");
+    }
+
+    #[test]
+    fn sanitize_json_keeps_plain_json() {
+        let raw = "  {\"summary\":\"ok\"}  ";
+        assert_eq!(sanitize_json_response(raw), "{\"summary\":\"ok\"}");
+    }
+
+    #[test]
+    fn txt_file_detection_is_case_insensitive() {
+        assert!(is_txt_file(Path::new("chapter001.TXT")));
+        assert!(!is_txt_file(Path::new("chapter001.md")));
+    }
+
+    #[test]
+    fn start_index_uses_suggestion_on_empty_input() {
+        assert_eq!(resolve_start_index("", 2, 5), (Some(2), false));
+    }
+
+    #[test]
+    fn start_index_handles_all_done_suggestion() {
+        assert_eq!(resolve_start_index("", 5, 5), (None, false));
+    }
+
+    #[test]
+    fn start_index_parses_valid_manual_value() {
+        assert_eq!(resolve_start_index("3", 1, 5), (Some(2), false));
+    }
+
+    #[test]
+    fn start_index_falls_back_on_invalid_input() {
+        assert_eq!(resolve_start_index("abc", 1, 5), (Some(1), true));
+    }
 }
